@@ -1,8 +1,8 @@
 # -*- encoding: binary -*-
 ENV["VERSION"] or abort "VERSION= must be specified"
 manifest = File.readlines('.manifest').map! { |x| x.chomp! }
-require 'wrongdoc'
-extend Wrongdoc::Gemspec
+require 'olddoc'
+extend Olddoc::Gemspec
 name, summary, title = readme_metadata
 
 # don't bother with tests that fork, not worth our time to get working
@@ -17,16 +17,13 @@ Gem::Specification.new do |s|
   s.version = "4.8.2.5.19"
   s.authors = ["#{name} hackers"]
   s.summary = summary
-  s.date = Time.now.utc.strftime('%Y-%m-%d')
   s.description = readme_description
-  s.email = %q{mongrel-unicorn@rubyforge.org}
+  s.email = %q{unicorn-public@bogomips.org}
   s.executables = %w(unicorn unicorn_rails)
   s.extensions = %w(ext/unicorn_http/extconf.rb)
   s.extra_rdoc_files = extra_rdoc_files(manifest)
   s.files = manifest
-  s.homepage = Wrongdoc.config[:rdoc_url]
-  s.rdoc_options = rdoc_options
-  s.rubyforge_project = %q{mongrel}
+  s.homepage = Olddoc.config['rdoc_url']
   s.test_files = test_files
 
   # for people that are absolutely stuck on Rails 2.3.2 and can't
@@ -37,8 +34,8 @@ Gem::Specification.new do |s|
   s.add_dependency(%q<kgio>, '~> 2.6')
   s.add_dependency(%q<raindrops>, '~> 0.7')
 
-  s.add_development_dependency('isolate', '~> 3.2')
-  s.add_development_dependency('wrongdoc', '~> 1.6.1')
+  s.add_development_dependency('test-unit', '~> 3.0')
+  s.add_development_dependency('olddoc', '~> 1.0')
 
   s.licenses = ["GPLv2+", "Ruby 1.8"]
 end

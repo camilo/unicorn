@@ -1,6 +1,5 @@
 # -*- encoding: binary -*-
 require 'logger'
-require 'unicorn/ssl_configurator'
 
 # Implements a simple DSL for configuring a \Unicorn server.
 #
@@ -13,7 +12,6 @@ require 'unicorn/ssl_configurator'
 # See the link:/TUNING.html document for more information on tuning unicorn.
 class Unicorn::Configurator
   include Unicorn
-  include Unicorn::SSLConfigurator
 
   # :stopdoc:
   attr_accessor :set, :config_file, :after_reload
@@ -49,7 +47,6 @@ class Unicorn::Configurator
     :check_client_connection => false,
     :rewindable_input => true, # for Rack 2.x: (Rack::VERSION[0] <= 1),
     :client_body_buffer_size => Unicorn::Const::MAX_BODY,
-    :trust_x_forwarded => true,
   }
   #:startdoc:
 
@@ -333,8 +330,6 @@ class Unicorn::Configurator
   #   to receive IPv4 queries on dual-stack systems.  A separate IPv4-only
   #   listener is required if this is true.
   #
-  #   This option is only available for Ruby 1.9.2 and later.
-  #
   #   Enabling this option for the IPv6-only listener and having a
   #   separate IPv4 listener is recommended if you wish to support IPv6
   #   on the same TCP port.  Otherwise, the value of \env[\"REMOTE_ADDR\"]
@@ -582,18 +577,6 @@ class Unicorn::Configurator
     set[:user] = [ user, group ]
   end
 
-  # Sets whether or not the parser will trust X-Forwarded-Proto and
-  # X-Forwarded-SSL headers and set "rack.url_scheme" to "https" accordingly.
-  # Rainbows!/Zbatery installations facing untrusted clients directly
-  # should set this to +false+.  This is +true+ by default as Unicorn
-  # is designed to only sit behind trusted nginx proxies.
-  #
-  # This has never been publically documented and is subject to removal
-  # in future releases.
-  def trust_x_forwarded(bool) # :nodoc:
-    set_bool(:trust_x_forwarded, bool)
-  end
-
   # expands "unix:path/to/foo" to a socket relative to the current path
   # expands pathnames of sockets if relative to "~" or "~username"
   # expands "*:port and ":port" to "0.0.0.0:port"
@@ -627,7 +610,7 @@ private
   def canonicalize_tcp(addr, port)
     packed = Socket.pack_sockaddr_in(port, addr)
     port, addr = Socket.unpack_sockaddr_in(packed)
-    /:/ =~ addr ? "[#{addr}]:#{port}" : "#{addr}:#{port}"
+    addr.include?(':') ? "[#{addr}]:#{port}" : "#{addr}:#{port}"
   end
 
   def set_path(var, path) #:nodoc:
@@ -683,7 +666,7 @@ private
       raise ArgumentError, "rackup file (#{ru}) not readable"
 
     # it could be a .rb file, too, we don't parse those manually
-    ru =~ /\.ru\z/ or return
+    ru.end_with?('.ru') or return
 
     /^#\\(.*)/ =~ File.read(ru) or return
     RACKUP[:optparse].parse!($1.split(/\s+/))

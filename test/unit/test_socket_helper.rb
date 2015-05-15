@@ -1,6 +1,6 @@
 # -*- encoding: binary -*-
 
-require 'test/test_helper'
+require './test/test_helper'
 require 'tempfile'
 
 class TestSocketHelper < Test::Unit::TestCase
@@ -182,16 +182,16 @@ class TestSocketHelper < Test::Unit::TestCase
     sock = bind_listen "[#@test6_addr]:#{port}", :ipv6only => true
     cur = sock.getsockopt(:IPPROTO_IPV6, :IPV6_V6ONLY).unpack('i')[0]
     assert_equal 1, cur
-    rescue Errno::EAFNOSUPPORT
-  end if RUBY_VERSION >= "1.9.2"
+  rescue Errno::EAFNOSUPPORT
+  end
 
   def test_reuseport
     port = unused_port @test_addr
     name = "#@test_addr:#{port}"
     sock = bind_listen(name, :reuseport => true)
-    cur = sock.getsockopt(Socket::SOL_SOCKET, SO_REUSEPORT).unpack('i')[0]
+    cur = sock.getsockopt(:SOL_SOCKET, :SO_REUSEPORT).int
     assert_operator cur, :>, 0
   rescue Errno::ENOPROTOOPT
     # kernel does not support SO_REUSEPORT (older Linux)
-  end
+  end if defined?(Socket::SO_REUSEPORT)
 end

@@ -8,6 +8,8 @@ RUBY = ruby
 RAKE = rake
 RAGEL = ragel
 RSYNC = rsync
+OLDDOC = olddoc
+RDOC = rdoc
 
 GIT-VERSION-FILE: .FORCE-GIT-VERSION-FILE
 	@./GIT-VERSION-GEN
@@ -23,11 +25,7 @@ endif
 
 RUBY_ENGINE := $(shell $(RUBY) -e 'puts((RUBY_ENGINE rescue "ruby"))')
 
-isolate_libs := tmp/isolate/$(RUBY_ENGINE)-$(RUBY_VERSION).mk
-$(isolate_libs): script/isolate_for_tests
-	@$(RUBY) script/isolate_for_tests
--include $(isolate_libs)
-MYLIBS = $(RUBYLIB):$(ISOLATE_LIBS)
+MYLIBS = $(RUBYLIB)
 
 # dunno how to implement this as concisely in Ruby, and hell, I love awk
 awk_slow := awk '/def test_/{print FILENAME"--"$$2".n"}' 2>/dev/null
@@ -59,10 +57,11 @@ $(ext)/Makefile: $(ext)/extconf.rb $(c_files)
 	cd $(@D) && $(RUBY) extconf.rb
 $(ext)/unicorn_http.$(DLEXT): $(ext)/Makefile
 	$(MAKE) -C $(@D)
-lib/unicorn_http.$(DLEXT): $(ext)/unicorn_http.$(DLEXT)
-	@mkdir -p lib
-	install -m644 $< $@
-http: lib/unicorn_http.$(DLEXT)
+http: $(ext)/unicorn_http.$(DLEXT)
+
+# only used for tests
+http-install: $(ext)/unicorn_http.$(DLEXT)
+	install -m644 $< lib/
 
 test-install: $(test_prefix)/.stamp
 $(test_prefix)/.stamp: $(inst_deps)
@@ -70,7 +69,7 @@ $(test_prefix)/.stamp: $(inst_deps)
 	tar cf - $(inst_deps) GIT-VERSION-GEN | \
 	  (cd $(test_prefix) && tar xf -)
 	$(MAKE) -C $(test_prefix) clean
-	$(MAKE) -C $(test_prefix) http shebang RUBY="$(RUBY)"
+	$(MAKE) -C $(test_prefix) http-install shebang RUBY="$(RUBY)"
 	> $@
 
 # this is only intended to be run within $(test_prefix)
@@ -87,10 +86,14 @@ test-unit: $(wildcard test/unit/test_*.rb)
 $(slow_tests): $(test_prefix)/.stamp
 	@$(MAKE) $(shell $(awk_slow) $@)
 
+# ensure we can require just the HTTP parser without the rest of unicorn
+test-require: $(ext)/unicorn_http.$(DLEXT)
+	$(RUBY) --disable-gems -I$(ext) -runicorn_http -e Unicorn
+
 test-integration: $(test_prefix)/.stamp
 	$(MAKE) -C t
 
-check: test test-integration
+check: test-require test test-integration
 test-all: check
 
 TEST_OPTS = -v
@@ -120,20 +123,19 @@ run_test = $(quiet_pre) \
 %.n: arg = $(subst .n,,$(subst --, -n ,$@))
 %.n: t = $(subst .n,$(log_suffix),$@)
 %.n: export PATH := $(test_prefix)/bin:$(PATH)
-%.n: export RUBYLIB := $(test_prefix):$(test_prefix)/lib:$(MYLIBS)
+%.n: export RUBYLIB := $(test_prefix)/lib:$(MYLIBS)
 %.n: $(test_prefix)/.stamp
 	$(run_test)
 
 $(T): arg = $@
 $(T): t = $(subst .rb,$(log_suffix),$@)
 $(T): export PATH := $(test_prefix)/bin:$(PATH)
-$(T): export RUBYLIB := $(test_prefix):$(test_prefix)/lib:$(MYLIBS)
+$(T): export RUBYLIB := $(test_prefix)/lib:$(MYLIBS)
 $(T): $(test_prefix)/.stamp
 	$(run_test)
 
 install: $(bins) $(ext)/unicorn_http.c
 	$(prep_setup_rb)
-	$(RM) lib/unicorn_http.$(DLEXT)
 	$(RM) -r .install-tmp
 	mkdir .install-tmp
 	cp -p bin/* .install-tmp
@@ -149,42 +151,41 @@ prep_setup_rb := @-$(RM) $(setup_rb_files);$(MAKE) -C $(ext) clean
 clean:
 	-$(MAKE) -C $(ext) clean
 	-$(MAKE) -C Documentation clean
-	$(RM) $(ext)/Makefile lib/unicorn_http.$(DLEXT)
+	$(RM) $(ext)/Makefile
 	$(RM) $(setup_rb_files) $(t_log)
 	$(RM) -r $(test_prefix) man
 
 man html:
 	$(MAKE) -C Documentation install-$@
 
-pkg_extra := GIT-VERSION-FILE lib/unicorn/version.rb ChangeLog LATEST NEWS \
+pkg_extra := GIT-VERSION-FILE lib/unicorn/version.rb LATEST NEWS \
              $(ext)/unicorn_http.c $(man1_paths)
 
-ChangeLog: GIT-VERSION-FILE .wrongdoc.yml
-	wrongdoc prepare
+NEWS:
+	$(OLDDOC) prepare
 
-.manifest: ChangeLog $(ext)/unicorn_http.c man
+.manifest: $(ext)/unicorn_http.c man NEWS
 	(git ls-files && for i in $@ $(pkg_extra); do echo $$i; done) | \
 	  LC_ALL=C sort > $@+
 	cmp $@+ $@ || mv $@+ $@
 	$(RM) $@+
 
-doc: .document $(ext)/unicorn_http.c man html .wrongdoc.yml
-	for i in $(man1_rdoc); do echo > $$i; done
+PLACEHOLDERS = $(man1_rdoc)
+doc: .document $(ext)/unicorn_http.c man html .olddoc.yml $(PLACEHOLDERS)
 	find bin lib -type f -name '*.rbc' -exec rm -f '{}' ';'
 	$(RM) -r doc
-	wrongdoc all
+	$(OLDDOC) prepare
+	$(RDOC) -f oldweb
+	$(OLDDOC) merge
 	install -m644 COPYING doc/COPYING
 	install -m644 $(shell LC_ALL=C grep '^[A-Z]' .document) doc/
 	install -m644 $(man1_paths) doc/
 	tar cf - $$(git ls-files examples/) | (cd doc && tar xf -)
-	$(RM) $(man1_rdoc)
 
 # publishes docs to http://unicorn.bogomips.org
 publish_doc:
 	-git set-file-times
 	$(MAKE) doc
-	find doc/images -type f | \
-		TZ=UTC xargs touch -d '1970-01-01 00:00:02' doc/rdoc.css
 	$(MAKE) doc_gz
 	chmod 644 $$(find doc -type f)
 	$(RSYNC) -av doc/ unicorn.bogomips.org:/srv/unicorn/
@@ -192,27 +193,15 @@ publish_doc:
 
 # Create gzip variants of the same timestamp as the original so nginx
 # "gzip_static on" can serve the gzipped versions directly.
-doc_gz: docs = $(shell find doc -type f ! -regex '^.*\.\(gif\|jpg\|png\|gz\)$$')
+doc_gz: docs = $(shell find doc -type f ! -regex '^.*\.gz$$')
 doc_gz:
 	for i in $(docs); do \
 	  gzip --rsyncable -9 < $$i > $$i.gz; touch -r $$i $$i.gz; done
 
 ifneq ($(VERSION),)
-rfproject := mongrel
 rfpackage := unicorn
 pkggem := pkg/$(rfpackage)-$(VERSION).gem
 pkgtgz := pkg/$(rfpackage)-$(VERSION).tgz
-release_notes := release_notes-$(VERSION)
-release_changes := release_changes-$(VERSION)
-
-release-notes: $(release_notes)
-release-changes: $(release_changes)
-$(release_changes):
-	wrongdoc release_changes > $@+
-	$(VISUAL) $@+ && test -s $@+ && mv $@+ $@
-$(release_notes):
-	wrongdoc release_notes > $@+
-	$(VISUAL) $@+ && test -s $@+ && mv $@+ $@
 
 # ensures we're actually on the tagged $(VERSION), only used for release
 verify:
@@ -248,20 +237,16 @@ $(pkgtgz): .manifest fix-perms
 
 package: $(pkgtgz) $(pkggem)
 
-release: verify package $(release_notes) $(release_changes)
-	# make tgz release on RubyForge
-	rubyforge add_release -f -n $(release_notes) -a $(release_changes) \
-	  $(rfproject) $(rfpackage) $(VERSION) $(pkgtgz)
+release: verify package
 	# push gem to Gemcutter
 	gem push $(pkggem)
-	# in case of gem downloads from RubyForge releases page
-	-rubyforge add_file \
-	  $(rfproject) $(rfpackage) $(VERSION) $(pkggem)
-	$(RAKE) fm_update VERSION=$(VERSION)
 else
 gem install-gem: GIT-VERSION-FILE
 	$(MAKE) $@ VERSION=$(GIT_VERSION)
 endif
+
+$(PLACEHOLDERS):
+	echo olddoc_placeholder > $@
 
 .PHONY: .FORCE-GIT-VERSION-FILE doc $(T) $(slow_tests) man
 .PHONY: test-install

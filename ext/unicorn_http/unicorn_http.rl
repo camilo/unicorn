@@ -29,82 +29,27 @@ void init_unicorn_httpdate(void);
 /* all of these flags need to be set for keepalive to be supported */
 #define UH_FL_KEEPALIVE (UH_FL_KAVERSION | UH_FL_REQEOF | UH_FL_HASHEADER)
 
-/*
- * whether or not to trust X-Forwarded-Proto and X-Forwarded-SSL when
- * setting rack.url_scheme
- */
-static VALUE trust_x_forward = Qtrue;
-
-static unsigned long keepalive_requests = 100; /* same as nginx */
-
-/*
- * Returns the maximum number of keepalive requests a client may make
- * before the parser refuses to continue.
- */
-static VALUE ka_req(VALUE self)
-{
-  return ULONG2NUM(keepalive_requests);
-}
-
-/*
- * Sets the maximum number of keepalive requests a client may make.
- * A special value of +nil+ causes this to be the maximum value
- * possible (this is architecture-dependent).
- */
-static VALUE set_ka_req(VALUE self, VALUE val)
-{
-  keepalive_requests = NIL_P(val) ? ULONG_MAX : NUM2ULONG(val);
-
-  return ka_req(self);
-}
-
-/*
- * Sets whether or not the parser will trust X-Forwarded-Proto and
- * X-Forwarded-SSL headers and set "rack.url_scheme" to "https" accordingly.
- * Rainbows!/Zbatery installations facing untrusted clients directly
- * should set this to +false+
- */
-static VALUE set_xftrust(VALUE self, VALUE val)
-{
-  if (Qtrue == val || Qfalse == val)
-    trust_x_forward = val;
-  else
-    rb_raise(rb_eTypeError, "must be true or false");
-
-  return val;
-}
-
-/*
- * returns whether or not the parser will trust X-Forwarded-Proto and
- * X-Forwarded-SSL headers and set "rack.url_scheme" to "https" accordingly
- */
-static VALUE xftrust(VALUE self)
-{
-  return trust_x_forward;
-}
-
-static size_t MAX_HEADER_LEN = 1024 * (80 + 32); /* same as Mongrel */
+static unsigned int MAX_HEADER_LEN = 1024 * (80 + 32); /* same as Mongrel */
 
 /* this is only intended for use with Rainbows! */
 static VALUE set_maxhdrlen(VALUE self, VALUE len)
 {
-  return SIZET2NUM(MAX_HEADER_LEN = NUM2SIZET(len));
+  return UINT2NUM(MAX_HEADER_LEN = NUM2UINT(len));
 }
 
 /* keep this small for Rainbows! since every client has one */
 struct http_parser {
   int cs; /* Ragel internal state */
   unsigned int flags;
-  unsigned long nr_requests;
-  size_t mark;
-  size_t offset;
+  unsigned int mark;
+  unsigned int offset;
   union { /* these 2 fields don't nest */
-    size_t field;
-    size_t query;
+    unsigned int field;
+    unsigned int query;
   } start;
   union {
-    size_t field_len; /* only used during header processing */
-    size_t dest_offset; /* only used during body processing */
+    unsigned int field_len; /* only used during header processing */
+    unsigned int dest_offset; /* only used during body processing */
   } s;
   VALUE buf;
   VALUE env;
@@ -124,13 +69,25 @@ static void parser_raise(VALUE klass, const char *msg)
   VALUE exc = rb_exc_new2(klass, msg);
   VALUE bt = rb_ary_new();
 
-	rb_funcall(exc, id_set_backtrace, 1, bt);
-	rb_exc_raise(exc);
+  rb_funcall(exc, id_set_backtrace, 1, bt);
+  rb_exc_raise(exc);
+}
+
+static inline unsigned int ulong2uint(unsigned long n)
+{
+  unsigned int i = (unsigned int)n;
+
+  if (sizeof(unsigned int) != sizeof(unsigned long)) {
+    if ((unsigned long)i != n) {
+      rb_raise(rb_eRangeError, "too large to be 32-bit uint: %lu", n);
+    }
+  }
+  return i;
 }
 
 #define REMAINING (unsigned long)(pe - p)
-#define LEN(AT, FPC) (FPC - buffer - hp->AT)
-#define MARK(M,FPC) (hp->M = (FPC) - buffer)
+#define LEN(AT, FPC) (ulong2uint(FPC - buffer) - hp->AT)
+#define MARK(M,FPC) (hp->M = ulong2uint((FPC) - buffer))
 #define PTR_TO(F) (buffer + hp->F)
 #define STR_NEW(M,FPC) rb_str_new(PTR_TO(M), LEN(M, FPC))
 #define STRIPPED_STR_NEW(M,FPC) stripped_str_new(PTR_TO(M), LEN(M, FPC))
@@ -466,7 +423,7 @@ http_parser_execute(struct http_parser *hp, char *buffer, size_t len)
 post_exec: /* "_out:" also goes here */
   if (hp->cs != http_parser_error)
     hp->cs = cs;
-  hp->offset = p - buffer;
+  hp->offset = ulong2uint(p - buffer);
 
   assert(p <= pe && "buffer overflow after parsing execute");
   assert(hp->offset <= len && "offset longer than length");
@@ -491,26 +448,29 @@ static void set_url_scheme(VALUE env, VALUE *server_port)
   VALUE scheme = rb_hash_aref(env, g_rack_url_scheme);
 
   if (NIL_P(scheme)) {
-    if (trust_x_forward == Qfalse) {
-      scheme = g_http;
+    /*
+     * would anybody be horribly opposed to removing the X-Forwarded-SSL
+     * and X-Forwarded-Proto handling from this parser?  We've had it
+     * forever and nobody has said anything against it, either.
+     * Anyways, please send comments to our public mailing list:
+     * unicorn-public@bogomips.org (no HTML mail, no subscription necessary)
+     */
+    scheme = rb_hash_aref(env, g_http_x_forwarded_ssl);
+    if (!NIL_P(scheme) && STR_CSTR_EQ(scheme, "on")) {
+      *server_port = g_port_443;
+      scheme = g_https;
     } else {
-      scheme = rb_hash_aref(env, g_http_x_forwarded_ssl);
-      if (!NIL_P(scheme) && STR_CSTR_EQ(scheme, "on")) {
-        *server_port = g_port_443;
-        scheme = g_https;
+      scheme = rb_hash_aref(env, g_http_x_forwarded_proto);
+      if (NIL_P(scheme)) {
+        scheme = g_http;
       } else {
-        scheme = rb_hash_aref(env, g_http_x_forwarded_proto);
-        if (NIL_P(scheme)) {
-          scheme = g_http;
+        long len = RSTRING_LEN(scheme);
+        if (len >= 5 && !memcmp(RSTRING_PTR(scheme), "https", 5)) {
+          if (len != 5)
+            scheme = g_https;
+          *server_port = g_port_443;
         } else {
-          long len = RSTRING_LEN(scheme);
-          if (len >= 5 && !memcmp(RSTRING_PTR(scheme), "https", 5)) {
-            if (len != 5)
-              scheme = g_https;
-            *server_port = g_port_443;
-          } else {
-            scheme = g_http;
-          }
+          scheme = g_http;
         }
       }
     }
@@ -608,7 +568,6 @@ static VALUE HttpParser_init(VALUE self)
   http_parser_init(hp);
   hp->buf = rb_str_new(NULL, 0);
   hp->env = rb_hash_new();
-  hp->nr_requests = keepalive_requests;
 
   return self;
 }
@@ -629,55 +588,6 @@ static VALUE HttpParser_clear(VALUE self)
   rb_ivar_set(self, id_response_start_sent, Qfalse);
 
   return self;
-}
-
-/**
- * call-seq:
- *    parser.dechunk! => parser
- *
- * Resets the parser to a state suitable for dechunking response bodies
- *
- */
-static VALUE HttpParser_dechunk_bang(VALUE self)
-{
-  struct http_parser *hp = data_get(self);
-
-  http_parser_init(hp);
-
-  /*
-   * we don't care about trailers in dechunk-only mode,
-   * but if we did we'd set UH_FL_HASTRAILER and clear hp->env
-   */
-  if (0) {
-    rb_funcall(hp->env, id_clear, 0);
-    hp->flags = UH_FL_HASTRAILER;
-  }
-
-  hp->flags |= UH_FL_HASBODY | UH_FL_INBODY | UH_FL_CHUNKED;
-  hp->cs = http_parser_en_ChunkedBody;
-
-  return self;
-}
-
-/**
- * call-seq:
- *    parser.reset => nil
- *
- * Resets the parser to it's initial state so that you can reuse it
- * rather than making new ones.
- *
- * This method is deprecated and to be removed in Unicorn 4.x
- */
-static VALUE HttpParser_reset(VALUE self)
-{
-  static int warned;
-
-  if (!warned) {
-    rb_warn("Unicorn::HttpParser#reset is deprecated; "
-            "use Unicorn::HttpParser#clear instead");
-  }
-  HttpParser_clear(self);
-  return Qnil;
 }
 
 static void advance_str(VALUE str, off_t nr)
@@ -842,15 +752,13 @@ static VALUE HttpParser_keepalive(VALUE self)
  *    parser.next? => true or false
  *
  * Exactly like HttpParser#keepalive?, except it will reset the internal
- * parser state on next parse if it returns true.  It will also respect
- * the maximum *keepalive_requests* value and return false if that is
- * reached.
+ * parser state on next parse if it returns true.
  */
 static VALUE HttpParser_next(VALUE self)
 {
   struct http_parser *hp = data_get(self);
 
-  if ((HP_FL_ALL(hp, KEEPALIVE)) && (hp->nr_requests-- != 0)) {
+  if (HP_FL_ALL(hp, KEEPALIVE)) {
     HP_FL_SET(hp, TO_CLEAR);
     return Qtrue;
   }
@@ -969,7 +877,7 @@ void Init_unicorn_http(void)
 {
   VALUE mUnicorn, cHttpParser;
 
-  mUnicorn = rb_const_get(rb_cObject, rb_intern("Unicorn"));
+  mUnicorn = rb_define_module("Unicorn");
   cHttpParser = rb_define_class_under(mUnicorn, "HttpParser", rb_cObject);
   eHttpParserError =
          rb_define_class_under(mUnicorn, "HttpParserError", rb_eIOError);
@@ -982,8 +890,6 @@ void Init_unicorn_http(void)
   rb_define_alloc_func(cHttpParser, HttpParser_alloc);
   rb_define_method(cHttpParser, "initialize", HttpParser_init, 0);
   rb_define_method(cHttpParser, "clear", HttpParser_clear, 0);
-  rb_define_method(cHttpParser, "reset", HttpParser_reset, 0);
-  rb_define_method(cHttpParser, "dechunk!", HttpParser_dechunk_bang, 0);
   rb_define_method(cHttpParser, "parse", HttpParser_parse, 0);
   rb_define_method(cHttpParser, "add_parse", HttpParser_add_parse, 1);
   rb_define_method(cHttpParser, "headers", HttpParser_headers, 2);
@@ -1012,14 +918,6 @@ void Init_unicorn_http(void)
    */
   rb_define_const(cHttpParser, "LENGTH_MAX", OFFT2NUM(UH_OFF_T_MAX));
 
-  /* default value for keepalive_requests */
-  rb_define_const(cHttpParser, "KEEPALIVE_REQUESTS_DEFAULT",
-                  ULONG2NUM(keepalive_requests));
-
-  rb_define_singleton_method(cHttpParser, "keepalive_requests", ka_req, 0);
-  rb_define_singleton_method(cHttpParser, "keepalive_requests=", set_ka_req, 1);
-  rb_define_singleton_method(cHttpParser, "trust_x_forwarded=", set_xftrust, 1);
-  rb_define_singleton_method(cHttpParser, "trust_x_forwarded?", xftrust, 0);
   rb_define_singleton_method(cHttpParser, "max_header_len=", set_maxhdrlen, 1);
 
   init_common_fields();

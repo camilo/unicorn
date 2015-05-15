@@ -1,5 +1,4 @@
 # -*- encoding: binary -*-
-require 'fcntl'
 require 'etc'
 require 'stringio'
 require 'rack'
@@ -22,8 +21,7 @@ module Unicorn
   # since there is nothing in the application stack that is responsible
   # for client shutdowns/disconnects.  This exception is visible to Rack
   # applications unless PrereadInput middleware is loaded.
-  class ClientShutdown < EOFError
-  end
+  ClientShutdown = Class.new(EOFError)
 
   # :stopdoc:
 
@@ -67,6 +65,7 @@ module Unicorn
           use Rack::CommonLogger, $stderr
           use Rack::ShowExceptions
           use Rack::Lint
+          use Rack::TempfileReaper if Rack.const_defined?(:TempfileReaper)
           run inner_app
         end.to_app
       when "deployment"
@@ -74,6 +73,7 @@ module Unicorn
           use Rack::ContentLength
           use Rack::Chunked
           use Rack::CommonLogger, $stderr
+          use Rack::TempfileReaper if Rack.const_defined?(:TempfileReaper)
           run inner_app
         end.to_app
       else
@@ -100,19 +100,13 @@ module Unicorn
 
   # remove this when we only support Ruby >= 2.0
   def self.pipe # :nodoc:
-    Kgio::Pipe.new.each { |io| io.fcntl(Fcntl::F_SETFD, Fcntl::FD_CLOEXEC) }
+    Kgio::Pipe.new.each { |io| io.close_on_exec = true }
   end
   # :startdoc:
 end
 # :enddoc:
-require 'unicorn/const'
-require 'unicorn/socket_helper'
-require 'unicorn/stream_input'
-require 'unicorn/tee_input'
-require 'unicorn/http_request'
-require 'unicorn/configurator'
-require 'unicorn/tmpio'
-require 'unicorn/util'
-require 'unicorn/http_response'
-require 'unicorn/worker'
-require 'unicorn/http_server'
+
+%w(const socket_helper stream_input tee_input http_request configurator
+   tmpio util http_response worker http_server).each do |s|
+  require_relative "unicorn/#{s}"
+end

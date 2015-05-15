@@ -22,8 +22,6 @@ class Unicorn::TmpIO < File
     fp
   end
 
-  # for easier env["rack.input"] compatibility with Rack <= 1.1
-  def size
-    stat.size
-  end unless File.method_defined?(:size)
+  # pretend we're Tempfile for Rack::TempfileReaper
+  alias close! close
 end
